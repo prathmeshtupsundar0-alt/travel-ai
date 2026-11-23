@@ -1,0 +1,2 @@
+function calculateBudget({ budget, days, travelers }) { const total = Math.max(0, Number(budget) || 0) || Math.max(1, Number(days) || 1) * Math.max(1, Number(travelers) || 1) * 2000; const weights = { transportation: .27, accommodation: .28, food: .17, activities: .13, localTransport: .09, miscellaneous: .06 }; const result = {}; for (const [key, weight] of Object.entries(weights)) result[key] = Math.round(total * weight); result.estimatedTotal = Object.values(result).reduce((sum, value) => sum + value, 0); return result }
+module.exports = { calculateBudget }

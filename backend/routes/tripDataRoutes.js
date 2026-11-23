@@ -1,0 +1,1 @@
+const router = require('express').Router(); const { protect } = require('../middleware/authMiddleware'); const c = require('../controllers/tripDataController'); router.get('/:tripId/weather', protect, c.weather); router.get('/:tripId/route', protect, c.route); module.exports = router

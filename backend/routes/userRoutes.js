@@ -1,0 +1,1 @@
+const router = require('express').Router(); const { protect } = require('../middleware/authMiddleware'); const { getProfile, lookupUser } = require('../controllers/userController'); router.get('/profile', protect, getProfile); router.get('/lookup', protect, lookupUser); module.exports = router

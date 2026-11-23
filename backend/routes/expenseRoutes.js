@@ -1,0 +1,1 @@
+const router = require('express').Router(); const c = require('../controllers/expenseController'); const { protect } = require('../middleware/authMiddleware'); router.use(protect); router.route('/:tripId').get(c.list).post(c.create); router.route('/item/:expenseId').put(c.update).delete(c.remove); module.exports = router

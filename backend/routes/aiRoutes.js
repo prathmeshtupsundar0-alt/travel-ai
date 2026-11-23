@@ -1,0 +1,1 @@
+const router = require('express').Router(); const { protect } = require('../middleware/authMiddleware'); const { generate } = require('../controllers/aiController'); router.post('/generate-itinerary', protect, generate); module.exports = router

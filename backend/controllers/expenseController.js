@@ -1,0 +1,10 @@
+const { z } = require('zod')
+const Expense = require('../models/Expense')
+const { findAccessible } = require('./tripController')
+const asyncHandler = require('../utils/asyncHandler')
+const schema = z.object({ category: z.enum(['Transportation', 'Accommodation', 'Food', 'Activities', 'Local Transport', 'Shopping', 'Miscellaneous']), title: z.string().trim().min(1).max(150), amount: z.coerce.number().positive(), date: z.coerce.date().optional(), notes: z.string().trim().max(500).optional() })
+const list = asyncHandler(async (req, res) => { if (!await findAccessible(req.params.tripId, req.user._id)) return res.status(404).json({ success: false, message: 'Trip not found' }); res.json({ success: true, expenses: await Expense.find({ trip: req.params.tripId }).sort({ date: -1 }) }) })
+const create = asyncHandler(async (req, res) => { if (!await findAccessible(req.params.tripId, req.user._id)) return res.status(404).json({ success: false, message: 'Trip not found' }); const expense = await Expense.create({ ...schema.parse(req.body), trip: req.params.tripId, user: req.user._id }); res.status(201).json({ success: true, expense }) })
+const update = asyncHandler(async (req, res) => { const expense = await Expense.findOne({ _id: req.params.expenseId, user: req.user._id }); if (!expense) return res.status(404).json({ success: false, message: 'Expense not found' }); Object.assign(expense, schema.partial().parse(req.body)); await expense.save(); res.json({ success: true, expense }) })
+const remove = asyncHandler(async (req, res) => { const expense = await Expense.findOneAndDelete({ _id: req.params.expenseId, user: req.user._id }); if (!expense) return res.status(404).json({ success: false, message: 'Expense not found' }); res.json({ success: true, message: 'Expense deleted' }) })
+module.exports = { list, create, update, remove }

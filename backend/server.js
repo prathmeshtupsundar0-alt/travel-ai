@@ -32,6 +32,8 @@ const port = Number(process.env.PORT) || 5000;
 
 const app = express();
 
+app.set('trust proxy', 1);
+
 app.use(helmet());
 app.use(
   cors({

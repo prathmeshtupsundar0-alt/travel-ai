@@ -4073,7 +4073,17 @@ function TripDetail({ user }: { user: User }) {
 }
 
 function App() {
-  const [user, setUser] = useState<User | null>(null)
+  const [user, setUser] = useState<User | null>(() => {
+    try {
+      const token = localStorage.getItem('travelai_token')
+      const cached = localStorage.getItem('travelai_user')
+      if (token && cached) return JSON.parse(cached) as User
+    } catch {
+      // ignore corrupted storage
+    }
+    return null
+  })
+  const [authLoading, setAuthLoading] = useState<boolean>(() => Boolean(localStorage.getItem('travelai_token')))
   const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem('travelai_theme') === 'dark')
 
   useEffect(() => {
@@ -4083,33 +4093,55 @@ function App() {
 
   const onAuth = (u: User, t: string) => {
     localStorage.setItem('travelai_token', t)
+    localStorage.setItem('travelai_user', JSON.stringify(u))
     setUser(u)
+    setAuthLoading(false)
   }
   const logout = () => {
     void authApi.logout().catch(() => {})
     localStorage.removeItem('travelai_token')
+    localStorage.removeItem('travelai_user')
     setUser(null)
+    setAuthLoading(false)
   }
 
   useEffect(() => {
+    void registerReminderServiceWorker()
     authApi
       .me()
-      .then((r) => setUser(r.data.user))
-      .catch(() => localStorage.removeItem('travelai_token'))
+      .then((r) => {
+        setUser(r.data.user)
+        localStorage.setItem('travelai_user', JSON.stringify(r.data.user))
+      })
+      .catch((err) => {
+        if (err?.response?.status === 401) {
+          localStorage.removeItem('travelai_token')
+          localStorage.removeItem('travelai_user')
+          setUser(null)
+        }
+      })
+      .finally(() => {
+        setAuthLoading(false)
+      })
   }, [])
 
-  const protectedPage = (page: React.ReactNode) =>
-    user ? (
-      <Layout user={user} onLogout={logout} darkMode={darkMode} onToggleDark={() => setDarkMode((d) => !d)}>
-        {page}
-      </Layout>
-    ) : (
-      <Navigate to="/login" replace />
-    )
+  const protectedPage = (page: React.ReactNode) => {
+    if (user) {
+      return (
+        <Layout user={user} onLogout={logout} darkMode={darkMode} onToggleDark={() => setDarkMode((d) => !d)}>
+          {page}
+        </Layout>
+      )
+    }
+    if (authLoading) {
+      return <section className="content">Restoring your session…</section>
+    }
+    return <Navigate to="/login" replace />
+  }
 
   return (
     <Routes>
-      <Route path="/" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />
+      <Route path="/" element={authLoading && !user ? <section className="content">Loading…</section> : <Navigate to={user ? '/dashboard' : '/login'} replace />} />
       <Route path="/login" element={user ? <Navigate to="/dashboard" /> : <Auth onAuth={onAuth} />} />
       <Route path="/register" element={user ? <Navigate to="/dashboard" /> : <Auth register onAuth={onAuth} />} />
       <Route path="/dashboard" element={protectedPage(<Dashboard />)} />

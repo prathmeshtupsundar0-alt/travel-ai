@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node -e \"const fs=require('fs');const html=fs.readFileSync('dist/index.html');['login','register','dashboard','trips','trips/new'].forEach(p=>{fs.mkdirSync('dist/'+p,{recursive:true});fs.writeFileSync('dist/'+p+'/index.html',html)});fs.writeFileSync('dist/404.html',html);\"",
     "preview": "vite preview"
   },
   "dependencies": {

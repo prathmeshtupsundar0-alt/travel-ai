@@ -127,13 +127,35 @@ const findOwned = (id, user) => {
   return Trip.findOne({ _id: id, user })
 }
 
-const findAccessible = async (id, user) => {
+const findAccessible = async (id, user, userEmail = '') => {
   if (!mongoose.Types.ObjectId.isValid(id)) return null
   const trip = await Trip.findById(id).populate('user', 'name email')
   if (!trip) return null
 
   const isTripOwner = String(trip.user?._id || trip.user) === String(user)
-  const isListedPartner = Array.isArray(trip.partners) && trip.partners.some((p) => String(p.user) === String(user))
+  let emailToMatch = String(userEmail || '').trim().toLowerCase()
+  if (!emailToMatch && !isTripOwner) {
+    const uDoc = await User.findById(user).select('email').lean()
+    emailToMatch = String(uDoc?.email || '').trim().toLowerCase()
+  }
+
+  let partnerUpdated = false
+  const isListedPartner =
+    Array.isArray(trip.partners) &&
+    trip.partners.some((p) => {
+      if (String(p.user) === String(user)) return true
+      if (emailToMatch && String(p.email || '').trim().toLowerCase() === emailToMatch) {
+        p.user = user
+        partnerUpdated = true
+        return true
+      }
+      return false
+    })
+
+  if (partnerUpdated) {
+    trip.markModified('partners')
+    await trip.save()
+  }
 
   let membership = await TripMember.findOne({ trip: id, user }).select('role')
   if (!membership) {
@@ -176,6 +198,21 @@ const findEditable = async (id, userId) => {
 }
 
 async function enrichAndPersistTrip(trip, role = 'OWNER', { saveIfModified = true, undoLabel = null, preMutationDays = null } = {}) {
+  // Recover itinerary from separate Itinerary collection if trip.itinerary.days was ever empty while an Itinerary doc exists
+  if (!trip.itinerary?.days?.length) {
+    const backupItinerary = await Itinerary.findOne({ trip: trip._id }).lean()
+    if (backupItinerary && Array.isArray(backupItinerary.days) && backupItinerary.days.length > 0) {
+      trip.itinerary = {
+        summary: backupItinerary.summary || trip.itinerary?.summary || '',
+        days: backupItinerary.days,
+        tips: Array.isArray(backupItinerary.tips) ? backupItinerary.tips : [],
+        generatedAt: backupItinerary.updatedAt || new Date(),
+      }
+      trip.markModified('itinerary')
+      saveIfModified = true
+    }
+  }
+
   if (undoLabel && Array.isArray(preMutationDays)) {
     if (!Array.isArray(trip.undoHistory)) trip.undoHistory = []
     trip.undoHistory.push({
@@ -276,10 +313,33 @@ function ensureItineraryDaysInitialized(trip, minDay = 1) {
 }
 
 const listTrips = asyncHandler(async (req, res) => {
+  const userEmail = String(req.user.email || '').trim().toLowerCase()
   const [ownedTrips, partnerTrips] = await Promise.all([
     Trip.find({ user: req.user._id }).select('_id'),
-    Trip.find({ 'partners.user': req.user._id }).select('_id'),
+    Trip.find({
+      $or: [
+        { 'partners.user': req.user._id },
+        ...(userEmail ? [{ 'partners.email': userEmail }] : []),
+      ],
+    }),
   ])
+
+  for (const pt of partnerTrips) {
+    let changed = false
+    if (Array.isArray(pt.partners)) {
+      pt.partners.forEach((p) => {
+        if (userEmail && String(p.email || '').trim().toLowerCase() === userEmail && String(p.user) !== String(req.user._id)) {
+          p.user = req.user._id
+          changed = true
+        }
+      })
+    }
+    if (changed) {
+      pt.markModified('partners')
+      await pt.save()
+    }
+  }
+
   const bulkOps = [
     ...ownedTrips.map((trip) => ({
       updateOne: {

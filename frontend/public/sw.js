@@ -1,9 +1,45 @@
-self.addEventListener('install', () => {
+const APP_SHELL_CACHE = 'travelai-app-shell-v1'
+
+self.addEventListener('install', (event) => {
   self.skipWaiting()
+  event.waitUntil(
+    caches
+      .open(APP_SHELL_CACHE)
+      .then((cache) => cache.add('/index.html'))
+      .catch(() => {})
+  )
 })
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim())
+})
+
+// SPA Navigation Fallback: ensures refreshing /dashboard or /trips/:id always serves index.html even if static host returns 0 bytes
+self.addEventListener('fetch', (event) => {
+  if (event.request.mode !== 'navigate' || event.request.method !== 'GET') return
+  const url = new URL(event.request.url)
+  if (url.origin !== self.location.origin || url.pathname.startsWith('/api')) return
+
+  event.respondWith(
+    (async () => {
+      try {
+        const indexRes = await fetch('/index.html', { cache: 'no-store' })
+        if (indexRes && indexRes.ok) {
+          const clone = indexRes.clone()
+          caches
+            .open(APP_SHELL_CACHE)
+            .then((cache) => cache.put('/index.html', clone))
+            .catch(() => {})
+          return indexRes
+        }
+      } catch {
+        // Fall back to cached app shell if offline
+      }
+      const cached = await caches.match('/index.html')
+      if (cached) return cached
+      return fetch(event.request)
+    })()
+  )
 })
 
 self.addEventListener('message', (event) => {

@@ -101,6 +101,8 @@ type ReminderItem = {
   lastNotifiedKey?: string
   acknowledgedAt?: string | null
   deliveryChannel?: string
+  scheduleUpdatedAt?: string | null
+  wasCreatedInPast?: boolean
   alreadyNotified?: boolean
   status?: 'upcoming' | 'due_now' | 'notified_waiting_event' | 'overdue' | 'completed' | 'disabled' | 'unscheduled'
   msUntilNotify?: number | null
@@ -322,6 +324,33 @@ function getTodayInTz(tz = 'Asia/Kolkata'): string {
     return `${m.year}-${m.month}-${m.day}`
   } catch {
     return new Date().toISOString().slice(0, 10)
+  }
+}
+
+function getFutureTimeInTz(tz = 'Asia/Kolkata', offsetMinutes = 5): { date: string; time: string } {
+  const target = new Date(Date.now() + offsetMinutes * 60 * 1000)
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(target)
+    const m: Record<string, string> = {}
+    for (const p of parts) m[p.type] = p.value
+    const hr = m.hour === '24' ? '00' : m.hour
+    return {
+      date: `${m.year}-${m.month}-${m.day}`,
+      time: `${hr}:${m.minute}`,
+    }
+  } catch {
+    return {
+      date: target.toISOString().slice(0, 10),
+      time: '09:00',
+    }
   }
 }
 
@@ -771,18 +800,21 @@ function TripDetail({ user }: { user: User }) {
     notes: string
     enabled: boolean
     alarmSound: boolean
-  }>({
-    day: 1,
-    date: getTodayInTz(detectedBrowserTz),
-    time: '19:12',
-    timezone: detectedBrowserTz,
-    advanceMode: '15',
-    advanceMinutes: 15,
-    title: '',
-    type: 'Flight departure',
-    notes: '',
-    enabled: true,
-    alarmSound: true,
+  }>(() => {
+    const def = getFutureTimeInTz(detectedBrowserTz, 5)
+    return {
+      day: 1,
+      date: def.date,
+      time: def.time,
+      timezone: detectedBrowserTz,
+      advanceMode: '0',
+      advanceMinutes: 0,
+      title: '',
+      type: 'Flight departure',
+      notes: '',
+      enabled: true,
+      alarmSound: true,
+    }
   })
 
   const [newNote, setNewNote] = useState({
@@ -825,7 +857,7 @@ function TripDetail({ user }: { user: User }) {
       loadedTrip.reminderSettings?.tripTimezone ||
       loadedTrip.reminderSettings?.userTimezone ||
       detectedBrowserTz
-    const defaultAdv = loadedTrip.reminderSettings?.defaultAdvanceMinutes ?? 15
+    const defaultAdv = loadedTrip.reminderSettings?.defaultAdvanceMinutes ?? 0
     const presetModes = ['0', '5', '15', '30', '60', '120']
     setReminderForm((curr) =>
       editingReminderId
@@ -833,7 +865,7 @@ function TripDetail({ user }: { user: User }) {
         : {
             ...curr,
             timezone: effectiveTz,
-            date: curr.date || getTodayInTz(effectiveTz),
+            date: curr.date || getFutureTimeInTz(effectiveTz, 5).date,
             advanceMinutes: defaultAdv,
             advanceMode: presetModes.includes(String(defaultAdv)) ? String(defaultAdv) : 'custom',
           }
@@ -883,10 +915,15 @@ function TripDetail({ user }: { user: User }) {
 
     for (const rem of trip.reminders) {
       if (rem.enabled === false || rem.completed) continue
+      if (rem.wasCreatedInPast) continue
       if (!rem.notifyAt) continue
 
       const notifyTimeMs = new Date(rem.notifyAt).getTime()
       if (Number.isNaN(notifyTimeMs) || nowMs < notifyTimeMs) continue
+
+      // Guard: Never auto-trigger if notifyAt was already <= the timestamp when the reminder schedule was created/updated
+      const updatedAtMs = rem.scheduleUpdatedAt ? new Date(rem.scheduleUpdatedAt).getTime() : 0
+      if (updatedAtMs > 0 && notifyTimeMs <= updatedAtMs) continue
 
       // Do not trigger if event was more than 24 hours ago
       if (rem.scheduledAt) {
@@ -1481,13 +1518,14 @@ function TripDetail({ user }: { user: User }) {
       trip.reminderSettings?.tripTimezone ||
       trip.reminderSettings?.userTimezone ||
       detectedBrowserTz
-    const defaultAdv = trip.reminderSettings?.defaultAdvanceMinutes ?? 15
+    const defaultAdv = trip.reminderSettings?.defaultAdvanceMinutes ?? 0
     const presetModes = ['0', '5', '15', '30', '60', '120']
+    const def = getFutureTimeInTz(effectiveTz, 5)
     setEditingReminderId(null)
     setReminderForm({
       day: 1,
-      date: getTodayInTz(effectiveTz),
-      time: '19:12',
+      date: def.date,
+      time: def.time,
       timezone: effectiveTz,
       advanceMode: presetModes.includes(String(defaultAdv)) ? String(defaultAdv) : 'custom',
       advanceMinutes: defaultAdv,
@@ -1548,6 +1586,7 @@ function TripDetail({ user }: { user: User }) {
         notes: reminderForm.notes,
         enabled: reminderForm.enabled,
         alarmSound: reminderForm.alarmSound,
+        clientNowMs: Date.now(),
       }
       if (editingReminderId) {
         const { data } = await tripsApi.updateReminder(id, editingReminderId, payload)
@@ -1753,12 +1792,16 @@ function TripDetail({ user }: { user: User }) {
     const enabled = r.enabled !== false
     const completed = Boolean(r.completed)
     const alreadyNotified = Boolean(r.notifiedAt && r.lastNotifiedKey && r.lastNotifiedKey === r.notificationKey)
+    const updatedAtMs = r.scheduleUpdatedAt ? new Date(r.scheduleUpdatedAt).getTime() : 0
+    const wasCreatedInPast = Boolean(
+      r.wasCreatedInPast || (updatedAtMs > 0 && notifyMs !== null && notifyMs <= updatedAtMs)
+    )
 
     let liveStatus: ReminderItem['status'] = r.status || 'upcoming'
     if (completed) liveStatus = 'completed'
     else if (!enabled) liveStatus = 'disabled'
     else if (schedMs !== null && nowMs > schedMs) liveStatus = 'overdue'
-    else if (notifyMs !== null && nowMs >= notifyMs && !alreadyNotified) liveStatus = 'due_now'
+    else if (notifyMs !== null && nowMs >= notifyMs && !alreadyNotified && !wasCreatedInPast) liveStatus = 'due_now'
     else if (notifyMs !== null && nowMs >= notifyMs && alreadyNotified) liveStatus = 'notified_waiting_event'
     else if (notifyMs !== null) liveStatus = 'upcoming'
 
@@ -1767,6 +1810,7 @@ function TripDetail({ user }: { user: User }) {
       enabled,
       completed,
       alreadyNotified,
+      wasCreatedInPast,
       status: liveStatus,
       msUntilNotify: notifyMs !== null ? notifyMs - nowMs : null,
       msUntilEvent: schedMs !== null ? schedMs - nowMs : null,

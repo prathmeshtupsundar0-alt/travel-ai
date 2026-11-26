@@ -118,8 +118,11 @@ export async function registerReminderServiceWorker(): Promise<ServiceWorkerRegi
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return null
   if (!swRegistrationPromise) {
     swRegistrationPromise = navigator.serviceWorker
-      .register('/sw.js')
-      .then((reg) => reg)
+      .register('/sw.js', { updateViaCache: 'none' })
+      .then((reg) => {
+        void reg.update().catch(() => {})
+        return reg
+      })
       .catch(() => null)
   }
   return swRegistrationPromise
@@ -218,7 +221,7 @@ export async function showDesktopTravelNotification(params: {
 
   try {
     const reg = await registerReminderServiceWorker()
-    if (reg && 'showNotification' in reg) {
+    if (reg && reg.active && 'showNotification' in reg) {
       await reg.showNotification(title, {
         body,
         tag,

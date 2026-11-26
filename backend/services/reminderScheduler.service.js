@@ -235,13 +235,27 @@ function evaluateTripReminders(trip, nowDate = new Date()) {
     const obj = r.toObject ? r.toObject() : { ...r }
     const schedule = computeReminderSchedule(obj, trip)
     const scheduledMs = schedule.scheduledAt ? schedule.scheduledAt.getTime() : null
-    const notifyMs = schedule.notifyAt ? schedule.notifyAt.getTime() : null
+    let notifyMs = schedule.notifyAt ? schedule.notifyAt.getTime() : null
+    const updatedAtMs = obj.scheduleUpdatedAt ? new Date(obj.scheduleUpdatedAt).getTime() : 0
+
+    // If the reminder event (scheduledMs) was in the future when scheduled,
+    // but the advance window (notifyMs) had already passed before the user created/edited it,
+    // clamp the effective notification time to scheduledMs so it triggers at the event time instead of firing prematurely on creation.
+    if (updatedAtMs > 0 && scheduledMs !== null && notifyMs !== null && notifyMs <= updatedAtMs && scheduledMs > updatedAtMs) {
+      notifyMs = scheduledMs
+      schedule.notifyAt = schedule.scheduledAt
+      schedule.notifyTimeDisplay = schedule.scheduledTimeDisplay
+    }
+
     const enabled = obj.enabled !== false
     const completed = Boolean(obj.completed)
     const alreadyNotifiedForCurrentSchedule =
       Boolean(obj.notifiedAt) &&
       Boolean(schedule.notificationKey) &&
       obj.lastNotifiedKey === schedule.notificationKey
+
+    // A reminder that was already in the past at the moment it was created/updated is overdue, not due_now
+    const wasCreatedInPast = updatedAtMs > 0 && notifyMs !== null && notifyMs <= updatedAtMs
 
     let status = 'unscheduled'
     if (completed) {
@@ -251,7 +265,7 @@ function evaluateTripReminders(trip, nowDate = new Date()) {
     } else if (scheduledMs !== null && notifyMs !== null) {
       if (nowMs > scheduledMs) {
         status = 'overdue'
-      } else if (nowMs >= notifyMs && !alreadyNotifiedForCurrentSchedule) {
+      } else if (nowMs >= notifyMs && !alreadyNotifiedForCurrentSchedule && !wasCreatedInPast) {
         status = 'due_now'
       } else if (nowMs >= notifyMs && alreadyNotifiedForCurrentSchedule) {
         status = 'notified_waiting_event'
@@ -269,6 +283,7 @@ function evaluateTripReminders(trip, nowDate = new Date()) {
       enabled,
       completed,
       alreadyNotified: alreadyNotifiedForCurrentSchedule,
+      wasCreatedInPast,
       status,
       msUntilNotify,
       msUntilEvent,
@@ -288,6 +303,7 @@ function evaluateTripReminders(trip, nowDate = new Date()) {
       r.enabled &&
       !r.completed &&
       !r.alreadyNotified &&
+      !r.wasCreatedInPast &&
       r.notifyAt &&
       new Date(r.notifyAt).getTime() <= nowMs &&
       // Trigger for reminders whose notifyAt is reached and aren't more than 24 hours past scheduledAt

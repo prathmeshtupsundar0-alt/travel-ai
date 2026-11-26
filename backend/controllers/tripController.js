@@ -43,6 +43,19 @@ const activityInputSchema = z.object({
   isOutdoor: z.boolean().optional(),
 })
 
+const activityUpdateSchema = z.object({
+  day: z.coerce.number().int().min(1).max(30).optional(),
+  title: z.string().trim().min(1, 'Activity title is required').max(200).optional(),
+  description: z.string().trim().max(1000).optional(),
+  time: z.string().trim().max(30).optional(),
+  estimatedCost: z.coerce.number().finite().min(0).optional(),
+  category: z.string().trim().max(60).optional(),
+  location: z.string().trim().max(200).optional(),
+  notes: z.string().trim().max(1000).optional(),
+  durationMinutes: z.coerce.number().int().min(5).max(1440).optional(),
+  isOutdoor: z.boolean().optional(),
+})
+
 const preferencesSchema = z.object({
   excludedActivities: z.array(z.string().trim().min(1).max(100)).max(30).optional(),
   excludedCategories: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
@@ -68,6 +81,23 @@ const reminderInputSchema = z.object({
   enabled: z.boolean().optional().default(true),
   completed: z.boolean().optional().default(false),
   alarmSound: z.boolean().optional().default(true),
+  clientNowMs: z.coerce.number().optional(),
+})
+
+const reminderUpdateSchema = z.object({
+  day: z.coerce.number().int().min(1).max(30).optional(),
+  date: z.string().trim().max(20).optional(),
+  time: z.string().trim().max(30).optional(),
+  timezone: z.string().trim().max(80).optional(),
+  advanceMinutes: z.coerce.number().int().min(0).max(10080).optional(),
+  advanceMode: z.string().trim().max(20).optional(),
+  title: z.string().trim().min(1).max(200).optional(),
+  type: z.string().trim().max(60).optional(),
+  notes: z.string().trim().max(500).optional(),
+  enabled: z.boolean().optional(),
+  completed: z.boolean().optional(),
+  alarmSound: z.boolean().optional(),
+  clientNowMs: z.coerce.number().optional(),
 })
 
 const reminderSettingsSchema = z.object({
@@ -83,6 +113,13 @@ const noteInputSchema = z.object({
   tag: z.string().trim().max(60).optional().default('Personal note'),
   title: z.string().trim().max(200).optional().default(''),
   content: z.string().trim().min(1).max(3000),
+})
+
+const noteUpdateSchema = z.object({
+  day: z.coerce.number().int().min(1).max(30).optional(),
+  tag: z.string().trim().max(60).optional(),
+  title: z.string().trim().max(200).optional(),
+  content: z.string().trim().min(1).max(3000).optional(),
 })
 
 const findOwned = (id, user) => {
@@ -374,7 +411,7 @@ const updateActivity = asyncHandler(async (req, res) => {
     ? foundDay.activities[foundIndex].toObject()
     : foundDay.activities[foundIndex]
 
-  const partialInput = activityInputSchema.partial().parse(req.body)
+  const partialInput = activityUpdateSchema.parse(req.body)
   const updatedActivity = normalizeActivity(
     {
       ...existingAct,
@@ -656,18 +693,39 @@ const deletePackingItem = asyncHandler(async (req, res) => {
 
 // --- Section 4.C: Travel Reminders & Alarm Notification Endpoints ---
 
+function resolveCreationTimestamp(clientNowMs) {
+  const serverNow = Date.now()
+  if (typeof clientNowMs === 'number' && Number.isFinite(clientNowMs) && Math.abs(clientNowMs - serverNow) <= 15 * 60 * 1000) {
+    return new Date(Math.max(serverNow, clientNowMs))
+  }
+  return new Date(serverNow)
+}
+
 const addReminder = asyncHandler(async (req, res) => {
   const { trip, role, error } = await findEditable(req.params.id, req.user._id)
   if (error) return res.status(error.status).json({ success: false, message: error.message })
 
-  const input = reminderInputSchema.parse(req.body)
+  const { clientNowMs, ...input } = reminderInputSchema.parse(req.body)
   if (!Array.isArray(trip.reminders)) trip.reminders = []
   const schedule = computeReminderSchedule(input, trip)
+  const scheduleUpdatedAt = resolveCreationTimestamp(clientNowMs)
+
+  // If event is in the future but the advance window already passed before creation, clamp notifyAt to scheduledAt
+  if (
+    schedule.scheduledAt &&
+    schedule.notifyAt &&
+    schedule.notifyAt.getTime() <= scheduleUpdatedAt.getTime() &&
+    schedule.scheduledAt.getTime() > scheduleUpdatedAt.getTime()
+  ) {
+    schedule.notifyAt = schedule.scheduledAt
+    schedule.notifyTimeDisplay = schedule.scheduledTimeDisplay
+  }
 
   const newReminder = {
     id: new mongoose.Types.ObjectId().toString(),
     ...input,
     ...schedule,
+    scheduleUpdatedAt,
     notifiedAt: null,
     lastNotifiedKey: '',
     acknowledgedAt: null,
@@ -690,7 +748,10 @@ const updateReminder = asyncHandler(async (req, res) => {
   if (!reminder) return res.status(404).json({ success: false, message: 'Reminder not found' })
 
   const oldKey = reminder.notificationKey || ''
-  const input = reminderInputSchema.partial().parse(req.body)
+  const { clientNowMs, ...rawPatch } = reminderUpdateSchema.parse(req.body)
+  // Strip undefined fields so partial updates never overwrite existing reminder properties
+  const input = Object.fromEntries(Object.entries(rawPatch).filter(([, v]) => v !== undefined))
+
   const merged = {
     ...(reminder.toObject ? reminder.toObject() : reminder),
     ...input,
@@ -699,6 +760,17 @@ const updateReminder = asyncHandler(async (req, res) => {
   Object.assign(reminder, input, schedule)
 
   if (schedule.notificationKey && schedule.notificationKey !== oldKey) {
+    const scheduleUpdatedAt = resolveCreationTimestamp(clientNowMs)
+    if (
+      schedule.scheduledAt &&
+      schedule.notifyAt &&
+      schedule.notifyAt.getTime() <= scheduleUpdatedAt.getTime() &&
+      schedule.scheduledAt.getTime() > scheduleUpdatedAt.getTime()
+    ) {
+      reminder.notifyAt = schedule.scheduledAt
+      reminder.notifyTimeDisplay = schedule.scheduledTimeDisplay
+    }
+    reminder.scheduleUpdatedAt = scheduleUpdatedAt
     reminder.notifiedAt = null
     reminder.lastNotifiedKey = ''
     reminder.acknowledgedAt = null
@@ -900,7 +972,8 @@ const updateTripNote = asyncHandler(async (req, res) => {
   const note = (trip.tripNotes || []).find((n) => String(n.id) === String(noteId))
   if (!note) return res.status(404).json({ success: false, message: 'Note not found' })
 
-  const input = noteInputSchema.partial().parse(req.body)
+  const rawPatch = noteUpdateSchema.parse(req.body)
+  const input = Object.fromEntries(Object.entries(rawPatch).filter(([, v]) => v !== undefined))
   Object.assign(note, input, { updatedAt: new Date() })
   trip.markModified('tripNotes')
   await trip.save()

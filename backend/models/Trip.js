@@ -53,6 +53,7 @@ const reminderSchema = new mongoose.Schema({
   lastNotifiedKey: { type: String, trim: true, maxlength: 200, default: '' },
   acknowledgedAt: { type: Date, default: null },
   deliveryChannel: { type: String, trim: true, maxlength: 40, default: '' },
+  scheduleUpdatedAt: { type: Date, default: Date.now },
 }, { _id: false })
 
 const notificationHistorySchema = new mongoose.Schema({
@@ -115,7 +116,7 @@ const tripSchema = new mongoose.Schema({
   reminderSettings: {
     alarmSoundEnabled: { type: Boolean, default: true },
     alarmTone: { type: String, enum: ['chime', 'pulse', 'urgent'], default: 'chime' },
-    defaultAdvanceMinutes: { type: Number, min: 0, max: 10080, default: 15 },
+    defaultAdvanceMinutes: { type: Number, min: 0, max: 10080, default: 0 },
     userTimezone: { type: String, trim: true, maxlength: 80, default: 'Asia/Kolkata' },
     tripTimezone: { type: String, trim: true, maxlength: 80, default: '' },
   },

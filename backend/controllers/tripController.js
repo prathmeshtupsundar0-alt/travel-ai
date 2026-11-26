@@ -129,15 +129,31 @@ const findOwned = (id, user) => {
 
 const findAccessible = async (id, user) => {
   if (!mongoose.Types.ObjectId.isValid(id)) return null
-  const membership = await TripMember.findOne({ trip: id, user }).select('role')
-  if (!membership) {
-    const ownedTrip = await findOwned(id, user)
-    if (!ownedTrip) return null
-    await TripMember.updateOne({ trip: ownedTrip._id, user }, { $set: { role: 'OWNER' } }, { upsert: true })
-    return { trip: await Trip.findById(id).populate('user', 'name email'), role: 'OWNER' }
-  }
   const trip = await Trip.findById(id).populate('user', 'name email')
-  return trip ? { trip, role: membership.role } : null
+  if (!trip) return null
+
+  const isTripOwner = String(trip.user?._id || trip.user) === String(user)
+  const isListedPartner = Array.isArray(trip.partners) && trip.partners.some((p) => String(p.user) === String(user))
+
+  let membership = await TripMember.findOne({ trip: id, user }).select('role')
+  if (!membership) {
+    if (!isTripOwner && !isListedPartner) return null
+    const assignedRole = isTripOwner ? 'OWNER' : 'PARTNER'
+    await TripMember.updateOne({ trip: trip._id, user }, { $set: { role: assignedRole } }, { upsert: true })
+    return { trip, role: assignedRole }
+  }
+
+  // Automatically migrate any legacy VIEWER or EDITOR partner membership to equal PARTNER
+  let resolvedRole = membership.role
+  if (isTripOwner && resolvedRole !== 'OWNER') {
+    resolvedRole = 'OWNER'
+    await TripMember.updateOne({ _id: membership._id }, { $set: { role: 'OWNER' } })
+  } else if (!isTripOwner && (resolvedRole === 'VIEWER' || resolvedRole === 'EDITOR')) {
+    resolvedRole = 'PARTNER'
+    await TripMember.updateOne({ _id: membership._id }, { $set: { role: 'PARTNER' } })
+  }
+
+  return { trip, role: resolvedRole }
 }
 
 const findEditable = async (id, userId) => {
@@ -152,8 +168,9 @@ const findEditable = async (id, userId) => {
     }
     return { error: { status: 404, message: 'Trip not found' } }
   }
-  if (access.role === 'VIEWER') {
-    return { error: { status: 403, message: 'Viewers do not have permission to modify this trip' } }
+  // Equal-partner collaboration model: both OWNER and PARTNER have full trip-management authorization
+  if (access.role !== 'OWNER' && access.role !== 'PARTNER' && access.role !== 'EDITOR') {
+    return { error: { status: 403, message: 'You do not have permission to modify this trip' } }
   }
   return { trip: access.trip, role: access.role }
 }
@@ -259,22 +276,42 @@ function ensureItineraryDaysInitialized(trip, minDay = 1) {
 }
 
 const listTrips = asyncHandler(async (req, res) => {
-  const ownedTrips = await Trip.find({ user: req.user._id }).select('_id')
-  if (ownedTrips.length) {
-    await TripMember.bulkWrite(
-      ownedTrips.map((trip) => ({
-        updateOne: {
-          filter: { trip: trip._id, user: req.user._id },
-          update: { $set: { role: 'OWNER' } },
-          upsert: true,
-        },
-      }))
-    )
+  const [ownedTrips, partnerTrips] = await Promise.all([
+    Trip.find({ user: req.user._id }).select('_id'),
+    Trip.find({ 'partners.user': req.user._id }).select('_id'),
+  ])
+  const bulkOps = [
+    ...ownedTrips.map((trip) => ({
+      updateOne: {
+        filter: { trip: trip._id, user: req.user._id },
+        update: { $set: { role: 'OWNER' } },
+        upsert: true,
+      },
+    })),
+    ...partnerTrips.map((trip) => ({
+      updateOne: {
+        filter: { trip: trip._id, user: req.user._id },
+        update: { $set: { role: 'PARTNER' } },
+        upsert: true,
+      },
+    })),
+  ]
+  if (bulkOps.length) {
+    await TripMember.bulkWrite(bulkOps)
   }
+  // Migrate any remaining VIEWER/EDITOR memberships for this user to PARTNER
+  await TripMember.updateMany(
+    { user: req.user._id, role: { $in: ['VIEWER', 'EDITOR'] } },
+    { $set: { role: 'PARTNER' } }
+  )
+
   const memberships = await TripMember.find({ user: req.user._id }).sort({ createdAt: -1 }).populate('trip')
   const trips = memberships
     .filter(({ trip }) => trip)
-    .map(({ trip, role }) => ({ ...trip.toObject(), membershipRole: role }))
+    .map(({ trip, role }) => ({
+      ...trip.toObject(),
+      membershipRole: role === 'VIEWER' || role === 'EDITOR' ? 'PARTNER' : role,
+    }))
   res.json({ success: true, trips })
 })
 
@@ -303,7 +340,7 @@ const createTrip = asyncHandler(async (req, res) => {
   await TripMember.bulkWrite([
     { updateOne: { filter: { trip: trip._id, user: req.user._id }, update: { $set: { role: 'OWNER' } }, upsert: true } },
     ...partners.map((partner) => ({
-      updateOne: { filter: { trip: trip._id, user: partner.user }, update: { $set: { role: 'VIEWER' } }, upsert: true },
+      updateOne: { filter: { trip: trip._id, user: partner.user }, update: { $set: { role: 'PARTNER' } }, upsert: true },
     })),
   ])
   res.status(201).json({ success: true, trip })
@@ -323,8 +360,10 @@ const getTrip = asyncHandler(async (req, res) => {
 const updateTrip = asyncHandler(async (req, res) => {
   const { trip, role, error } = await findEditable(req.params.id, req.user._id)
   if (error) return res.status(error.status).json({ success: false, message: error.message })
-  const data = tripSchema.partial().parse(req.body)
+  const rawPatch = tripSchema.omit({ partnerEmails: true }).partial().parse(req.body)
+  const data = Object.fromEntries(Object.entries(rawPatch).filter(([, v]) => v !== undefined))
   Object.assign(trip, data)
+  if (data.travelDates) trip.markModified('travelDates')
   if (!trip.itinerary?.days?.length && Object.keys(data).some((key) => ['days', 'travelers', 'budget', 'destination', 'startLocation'].includes(key))) {
     trip.budgetBreakdown = calculateBudget(trip)
   }
@@ -334,15 +373,8 @@ const updateTrip = asyncHandler(async (req, res) => {
 })
 
 const deleteTrip = asyncHandler(async (req, res) => {
-  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-    return res.status(404).json({ success: false, message: 'Trip not found' })
-  }
-  const trip = await findOwned(req.params.id, req.user._id)
-  if (!trip) {
-    const exists = await Trip.exists({ _id: req.params.id })
-    if (exists) return res.status(403).json({ success: false, message: 'Only the trip owner can delete this trip' })
-    return res.status(404).json({ success: false, message: 'Trip not found' })
-  }
+  const { trip, error } = await findEditable(req.params.id, req.user._id)
+  if (error) return res.status(error.status).json({ success: false, message: error.message })
   await Expense.deleteMany({ trip: trip._id })
   await TripMember.deleteMany({ trip: trip._id })
   await Itinerary.deleteMany({ trip: trip._id })

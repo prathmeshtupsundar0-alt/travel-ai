@@ -158,7 +158,7 @@ type Trip = {
   preference: string
   travelDates?: { start?: string; end?: string }
   user?: { _id?: string; name: string; email: string } | string
-  membershipRole?: 'OWNER' | 'EDITOR' | 'VIEWER'
+  membershipRole?: 'OWNER' | 'PARTNER' | 'EDITOR' | 'VIEWER'
   partners?: { user: string; name: string; email: string }[]
   itinerary?: { summary?: string; days?: ItineraryDay[]; tips?: string[] }
   itineraryPreferences?: {
@@ -542,7 +542,11 @@ function Dashboard() {
                 </p>
                 <h2>{t.destination}</h2>
                 <p>From {t.startLocation}</p>
-                {t.membershipRole !== 'OWNER' && <small className="role-chip">Shared trip · {t.membershipRole}</small>}
+                {t.membershipRole !== 'OWNER' && (
+                  <small className="role-chip">
+                    Shared Trip · {t.membershipRole === 'VIEWER' || t.membershipRole === 'EDITOR' ? 'PARTNER' : t.membershipRole || 'PARTNER'}
+                  </small>
+                )}
                 <div className="tripcard-foot">
                   <b>{money(t.budget)} budget</b>
                   {hasItinerary && typeof estTotal === 'number' && (
@@ -754,6 +758,17 @@ function TripDetail({ user }: { user: User }) {
 
   // AI Preferences Modal State
   const [showPrefsModal, setShowPrefsModal] = useState(false)
+  const [showEditTripModal, setShowEditTripModal] = useState(false)
+  const [editTripForm, setEditTripForm] = useState({
+    destination: '',
+    startLocation: '',
+    days: 5,
+    travelers: 2,
+    budget: 50000,
+    preference: 'Mixed',
+    startDate: '',
+    endDate: '',
+  })
   const [prefsForm, setPrefsForm] = useState<{
     excludedActivities: string[]
     customExclusion: string
@@ -910,7 +925,8 @@ function TripDetail({ user }: { user: User }) {
   // Trigger Engine: checks if any enabled, uncompleted reminder has reached notifyAt
   useEffect(() => {
     if (!trip || !Array.isArray(trip.reminders) || trip.reminders.length === 0) return
-    const canEditTrip = trip.membershipRole === 'OWNER' || trip.membershipRole === 'EDITOR'
+    const canEditTrip =
+      trip.membershipRole === 'OWNER' || trip.membershipRole === 'PARTNER' || trip.membershipRole === 'EDITOR'
     if (!canEditTrip) return
 
     for (const rem of trip.reminders) {
@@ -1005,7 +1021,52 @@ function TripDetail({ user }: { user: User }) {
   if (!trip) return <section className="content">Loading trip…</section>
 
   const isOwner = trip.membershipRole === 'OWNER'
-  const canEdit = trip.membershipRole === 'OWNER' || trip.membershipRole === 'EDITOR'
+  const canEdit =
+    trip.membershipRole === 'OWNER' || trip.membershipRole === 'PARTNER' || trip.membershipRole === 'EDITOR'
+
+  const openEditTripDetailsModal = () => {
+    setEditTripForm({
+      destination: trip.destination || '',
+      startLocation: trip.startLocation || '',
+      days: Number(trip.days || 1),
+      travelers: Number(trip.travelers || 1),
+      budget: Number(trip.budget || 0),
+      preference: trip.preference || 'Mixed',
+      startDate: trip.travelDates?.start ? String(trip.travelDates.start).slice(0, 10) : '',
+      endDate: trip.travelDates?.end ? String(trip.travelDates.end).slice(0, 10) : '',
+    })
+    setShowEditTripModal(true)
+  }
+
+  const handleSaveTripDetails = async (e: FormEvent) => {
+    e.preventDefault()
+    setError('')
+    setBusy('Updating trip details…')
+    try {
+      const payload: Record<string, unknown> = {
+        destination: editTripForm.destination,
+        startLocation: editTripForm.startLocation,
+        days: Number(editTripForm.days),
+        travelers: Number(editTripForm.travelers),
+        budget: Number(editTripForm.budget),
+        preference: editTripForm.preference,
+      }
+      if (editTripForm.startDate || editTripForm.endDate) {
+        payload.travelDates = {
+          ...(editTripForm.startDate ? { start: editTripForm.startDate } : {}),
+          ...(editTripForm.endDate ? { end: editTripForm.endDate } : {}),
+        }
+      }
+      const { data } = await tripsApi.update(id, payload)
+      setTrip(data.trip)
+      setShowEditTripModal(false)
+      showToast('Updated trip details')
+    } catch (e) {
+      setError(message(e))
+    } finally {
+      setBusy('')
+    }
+  }
 
   // --- Itinerary Activity Handlers ---
 
@@ -1902,7 +1963,11 @@ function TripDetail({ user }: { user: User }) {
             Starting from {trip.startLocation} · Available Budget <b>{money(trip.budget)}</b> · Estimated Plan{' '}
             <b className={isOverBudget ? 'text-danger' : ''}>{money(estimatedTotal)}</b>
           </p>
-          {!isOwner && <small className="role-chip">Shared trip · {trip.membershipRole}</small>}
+          {!isOwner && (
+            <small className="role-chip">
+              Shared Trip · {trip.membershipRole === 'VIEWER' || trip.membershipRole === 'EDITOR' ? 'PARTNER' : trip.membershipRole || 'PARTNER'}
+            </small>
+          )}
         </div>
         <div className="head-actions">
           {canEdit && (trip.undoHistory?.length || 0) > 0 && (
@@ -1917,11 +1982,16 @@ function TripDetail({ user }: { user: User }) {
             </button>
           )}
           {canEdit && (
+            <button type="button" className="secondary-btn" onClick={openEditTripDetailsModal}>
+              <Edit3 size={15} /> Edit Trip Details
+            </button>
+          )}
+          {canEdit && (
             <button type="button" className="secondary-btn" onClick={() => setShowPrefsModal(true)}>
               <Sliders size={15} /> AI Preferences
             </button>
           )}
-          {isOwner && (
+          {canEdit && (
             <button
               className="login danger-text"
               onClick={async () => {
@@ -3479,7 +3549,7 @@ function TripDetail({ user }: { user: User }) {
                         {expense.category} — {money(expense.amount)}
                       </small>
                     </div>
-                    {String(expense.user) === user.id && (
+                    {canEdit && (
                       <div className="expense-actions">
                         <button type="button" onClick={() => void editExpense(expense)} disabled={!!busy}>
                           Edit
@@ -3880,6 +3950,118 @@ function TripDetail({ user }: { user: User }) {
                 </button>
                 <button type="submit" className="darkbtn" disabled={!!busy}>
                   Save Preferences
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: Edit Trip Details Modal (Available to both OWNER and PARTNER) */}
+      {showEditTripModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-trip-modal-title">
+          <div className="modal-card">
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">SHARED TRIP SETTINGS</p>
+                <h3 id="edit-trip-modal-title">Edit Trip Details</h3>
+              </div>
+              <button type="button" className="icon" onClick={() => setShowEditTripModal(false)} aria-label="Close">
+                <X size={18} />
+              </button>
+            </div>
+            <form className="modal-form" onSubmit={handleSaveTripDetails}>
+              <label>
+                Destination *
+                <input
+                  value={editTripForm.destination}
+                  onChange={(e) => setEditTripForm((curr) => ({ ...curr, destination: e.target.value }))}
+                  required
+                />
+              </label>
+              <label>
+                Starting Location *
+                <input
+                  value={editTripForm.startLocation}
+                  onChange={(e) => setEditTripForm((curr) => ({ ...curr, startLocation: e.target.value }))}
+                  required
+                />
+              </label>
+              <div className="formrow">
+                <label>
+                  Duration (Days) *
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={editTripForm.days}
+                    onChange={(e) => setEditTripForm((curr) => ({ ...curr, days: Number(e.target.value) }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Travellers *
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={editTripForm.travelers}
+                    onChange={(e) => setEditTripForm((curr) => ({ ...curr, travelers: Number(e.target.value) }))}
+                    required
+                  />
+                </label>
+              </div>
+              <div className="formrow">
+                <label>
+                  Total Budget (INR) *
+                  <input
+                    type="number"
+                    min="0"
+                    value={editTripForm.budget}
+                    onChange={(e) => setEditTripForm((curr) => ({ ...curr, budget: Number(e.target.value) }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Travel Preference *
+                  <select
+                    value={editTripForm.preference}
+                    onChange={(e) => setEditTripForm((curr) => ({ ...curr, preference: e.target.value }))}
+                  >
+                    {['Adventure', 'Relaxation', 'Family', 'Couple', 'Luxury', 'Budget', 'Nature', 'Culture', 'Food', 'Mixed'].map(
+                      (p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      )
+                    )}
+                  </select>
+                </label>
+              </div>
+              <div className="formrow">
+                <label>
+                  Start Date (optional)
+                  <input
+                    type="date"
+                    value={editTripForm.startDate}
+                    onChange={(e) => setEditTripForm((curr) => ({ ...curr, startDate: e.target.value }))}
+                  />
+                </label>
+                <label>
+                  End Date (optional)
+                  <input
+                    type="date"
+                    value={editTripForm.endDate}
+                    onChange={(e) => setEditTripForm((curr) => ({ ...curr, endDate: e.target.value }))}
+                  />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary-btn" onClick={() => setShowEditTripModal(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="darkbtn" disabled={!!busy}>
+                  Save Trip Details
                 </button>
               </div>
             </form>
